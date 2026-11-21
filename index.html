@@ -10,7 +10,12 @@ body{font-family:-apple-system,sans-serif;margin:0;padding:16px;background:#f4f1
 button{font-size:18px;padding:10px 16px;margin:4px;border-radius:10px;border:none;background:#333;color:#fff}
 .side{background:#fff;border-radius:12px;padding:10px;margin:10px 0}
 textarea{width:100%;font-size:18px;height:60px;box-sizing:border-box}
-canvas{width:100%;height:300px;background:#fff;border:1px solid #ccc;touch-action:none;border-radius:8px;display:block;margin-top:8px}
+canvas{width:100%;height:350px;background:#fff;border:1px solid #ccc;touch-action:none;border-radius:8px;display:block;margin-top:8px}
+#toolbar{position:sticky;top:0;z-index:5;background:#fff;border-radius:12px;padding:8px;display:flex;flex-wrap:wrap;align-items:center;gap:6px;box-shadow:0 2px 6px #0002}
+#toolbar button{background:#ddd;color:#000;margin:0}
+#toolbar button.on{background:#333;color:#fff}
+.col{width:32px;height:32px;border-radius:50%;border:3px solid #fff;box-shadow:0 0 0 1px #999;padding:0}
+.col.on{box-shadow:0 0 0 3px #333}
 #card{background:#fff;border-radius:16px;min-height:420px;padding:16px;touch-action:none;transition:transform .2s;user-select:none}
 #card img{max-width:100%;display:block;margin:8px 0}
 #card p{font-size:22px;white-space:pre-wrap}
@@ -27,9 +32,17 @@ canvas{width:100%;height:300px;background:#fff;border:1px solid #ccc;touch-actio
 </div>
 
 <div id="editor" class="hidden">
+  <div id="toolbar">
+    <button id="b-pen" onclick="setTool('pen')">✏️ Penna</button>
+    <button id="b-hl" onclick="setTool('hl')">🖍️ Evidenziatore</button>
+    <button id="b-er" onclick="setTool('er')">🧽 Gomma</button>
+    <span id="colors"></span>
+    <input type="range" min="1" max="10" value="3" id="size">
+    <button onclick="undo()">↩️ Annulla</button>
+  </div>
   <div id="sides"></div>
   <button onclick="saveCard()">Salva</button>
-  <button onclick="show('menu')">Annulla</button>
+  <button onclick="show('menu')">Esci</button>
 </div>
 
 <div id="review" class="hidden">
@@ -49,13 +62,32 @@ function show(id){
   $('count').textContent = cards.length;
 }
 
+/* ---- strumenti ---- */
+const COLORS = ['#000000','#1e5bd8','#d62828','#2a9d3a','#f4d03f','#ff8c1a','#9b51e0'];
+let tool = 'pen', color = '#000000', lastCanvas = null, pencilSeen = false;
+
+$('colors').innerHTML = COLORS.map(c =>
+  `<button class="col" style="background:${c}" data-c="${c}" onclick="setColor('${c}')"></button>`).join('');
+
+function setTool(t){
+  tool = t;
+  ['pen','hl','er'].forEach(x => $('b-'+x).classList.toggle('on', x === t));
+  if(t === 'hl' && color === '#000000') setColor('#f4d03f');
+}
+function setColor(c){
+  color = c;
+  document.querySelectorAll('.col').forEach(b => b.classList.toggle('on', b.dataset.c === c));
+  if(tool === 'er') setTool('pen');
+}
+setTool('pen'); setColor('#000000');
+
 function sideHTML(n, label){
   return `<div class="side"><b>${label}</b>
     <textarea id="t${n}" placeholder="Scrivi con la tastiera..."></textarea>
     <input type="file" accept="image/*" id="f${n}">
     <img id="i${n}" style="max-width:100%">
     <canvas id="c${n}"></canvas>
-    <button onclick="clearC(${n})">Cancella disegno</button></div>`;
+    <button onclick="clearC(${n})">Cancella tutto il disegno</button></div>`;
 }
 
 function openEditor(){
@@ -74,20 +106,58 @@ function openEditor(){
 function setupCanvas(n){
   const c = $('c'+n), r = devicePixelRatio;
   c.width = c.clientWidth * r; c.height = c.clientHeight * r;
-  const x = c.getContext('2d'); x.scale(r, r); x.lineCap = 'round';
-  let down = false; c.drawn = false;
-  c.onpointerdown = e => { down = true; x.beginPath(); x.moveTo(e.offsetX, e.offsetY); };
-  c.onpointermove = e => {
-    if(!down) return;
-    x.lineWidth = 1 + 3 * (e.pressure || .5);
-    x.lineTo(e.offsetX, e.offsetY); x.stroke();
-    x.beginPath(); x.moveTo(e.offsetX, e.offsetY);
-    c.drawn = true;
+  const x = c.getContext('2d'); x.setTransform(r,0,0,r,0,0);
+  c.strokes = []; let cur = null;
+
+  c.onpointerdown = e => {
+    if(e.pointerType === 'pen') pencilSeen = true;
+    if(pencilSeen && e.pointerType === 'touch') return; // ignora il palmo
+    lastCanvas = c;
+    cur = {tool, color, size: +$('size').value, pts: [[e.offsetX, e.offsetY, e.pressure || .5]]};
+    c.strokes.push(cur);
+    redraw(c);
   };
-  c.onpointerup = c.onpointerleave = () => down = false;
+  c.onpointermove = e => {
+    if(!cur) return;
+    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    evs.forEach(v => cur.pts.push([v.offsetX, v.offsetY, v.pressure || .5]));
+    redraw(c);
+  };
+  c.onpointerup = c.onpointercancel = () => cur = null;
 }
 
-function clearC(n){ setupCanvas(n); }
+function redraw(c){
+  const x = c.getContext('2d');
+  x.clearRect(0, 0, c.width, c.height);
+  x.lineCap = 'round'; x.lineJoin = 'round';
+  for(const s of c.strokes){
+    const p = s.pts;
+    x.save();
+    if(s.tool === 'pen'){
+      x.strokeStyle = s.color;
+      for(let i = 1; i < p.length; i++){
+        x.lineWidth = s.size * (0.5 + p[i][2]);
+        x.beginPath(); x.moveTo(p[i-1][0], p[i-1][1]); x.lineTo(p[i][0], p[i][1]); x.stroke();
+      }
+      if(p.length === 1){ x.fillStyle = s.color; x.beginPath(); x.arc(p[0][0], p[0][1], s.size/2, 0, 7); x.fill(); }
+    } else {
+      x.beginPath(); x.moveTo(p[0][0], p[0][1]);
+      for(const q of p) x.lineTo(q[0], q[1]);
+      if(s.tool === 'hl'){
+        x.globalAlpha = .35; x.globalCompositeOperation = 'multiply';
+        x.strokeStyle = s.color; x.lineWidth = s.size * 6; x.lineCap = 'butt';
+      } else {
+        x.globalCompositeOperation = 'destination-out'; x.lineWidth = s.size * 6;
+      }
+      x.stroke();
+    }
+    x.restore();
+  }
+  c.drawn = c.strokes.length > 0;
+}
+
+function undo(){ if(lastCanvas && lastCanvas.strokes.length){ lastCanvas.strokes.pop(); redraw(lastCanvas); } }
+function clearC(n){ const c = $('c'+n); c.strokes = []; redraw(c); }
 
 function saveCard(){
   const side = n => ({
@@ -100,13 +170,14 @@ function saveCard(){
   show('menu');
 }
 
+/* ---- ripasso ---- */
 let queue = [], pos = 0, flipped = false;
 
 function startReview(onlyUnknown){
   queue = cards.filter(c => !onlyUnknown || !c.known);
   if(!queue.length){ alert('Nessuna carta da ripassare!'); return; }
   queue.sort(() => Math.random() - .5);
-  pos = 0; show('review'); render();
+  pos = 0; flipped = false; show('review'); render();
 }
 
 function render(){
